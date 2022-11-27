@@ -85,8 +85,8 @@ fn init(io: SockRef<'_>) -> io::Result<()> {
 
     io.set_nonblocking(true)?;
 
-    // let addr = io.local_addr()?;
-    // let is_ipv4 = addr.family() == libc::AF_INET as libc::sa_family_t;
+    let addr = io.local_addr()?;
+    let is_ipv4 = addr.family() == libc::AF_INET as libc::sa_family_t;
     //
     // mac and ios do not support IP_RECVTOS on dual-stack sockets :(
     // older macos versions also don't have the flag and will error out if we don't ignore it
@@ -109,77 +109,78 @@ fn init(io: SockRef<'_>) -> io::Result<()> {
     //     }
     // }
     //
-    // #[cfg(target_os = "linux")]
-    // {
-    //     // opportunistically try to enable GRO. See gro::gro_segments().
-    //     let on: libc::c_int = 1;
-    //     unsafe {
-    //         libc::setsockopt(
-    //             io.as_raw_fd(),
-    //             libc::SOL_UDP,
-    //             libc::UDP_GRO,
-    //             &on as *const _ as _,
-    //             mem::size_of_val(&on) as _,
-    //         )
-    //     };
-    //
-    //     // Forbid IPv4 fragmentation. Set even for IPv6 to account for IPv6 mapped IPv4 addresses.
-    //     let rc = unsafe {
-    //         libc::setsockopt(
-    //             io.as_raw_fd(),
-    //             libc::IPPROTO_IP,
-    //             libc::IP_MTU_DISCOVER,
-    //             &libc::IP_PMTUDISC_PROBE as *const _ as _,
-    //             mem::size_of_val(&libc::IP_PMTUDISC_PROBE) as _,
-    //         )
-    //     };
-    //     if rc == -1 {
-    //         return Err(io::Error::last_os_error());
-    //     }
-    //
-    //     if is_ipv4 {
-    //         let on: libc::c_int = 1;
-    //         let rc = unsafe {
-    //             libc::setsockopt(
-    //                 io.as_raw_fd(),
-    //                 libc::IPPROTO_IP,
-    //                 libc::IP_PKTINFO,
-    //                 &on as *const _ as _,
-    //                 mem::size_of_val(&on) as _,
-    //             )
-    //         };
-    //         if rc == -1 {
-    //             return Err(io::Error::last_os_error());
-    //         }
-    //     } else {
-    //         let rc = unsafe {
-    //             libc::setsockopt(
-    //                 io.as_raw_fd(),
-    //                 libc::IPPROTO_IPV6,
-    //                 libc::IPV6_MTU_DISCOVER,
-    //                 &libc::IP_PMTUDISC_PROBE as *const _ as _,
-    //                 mem::size_of_val(&libc::IP_PMTUDISC_PROBE) as _,
-    //             )
-    //         };
-    //         if rc == -1 {
-    //             return Err(io::Error::last_os_error());
-    //         }
-    //
-    //         let on: libc::c_int = 1;
-    //         let rc = unsafe {
-    //             libc::setsockopt(
-    //                 io.as_raw_fd(),
-    //                 libc::IPPROTO_IPV6,
-    //                 libc::IPV6_RECVPKTINFO,
-    //                 &on as *const _ as _,
-    //                 mem::size_of_val(&on) as _,
-    //             )
-    //         };
-    //         if rc == -1 {
-    //             return Err(io::Error::last_os_error());
-    //         }
-    //     }
-    // }
+    #[cfg(target_os = "linux")]
+    {
+        // opportunistically try to enable GRO. See gro::gro_segments().
+        let on: libc::c_int = 1;
+        unsafe {
+            libc::setsockopt(
+                io.as_raw_fd(),
+                libc::SOL_UDP,
+                libc::UDP_GRO,
+                &on as *const _ as _,
+                mem::size_of_val(&on) as _,
+            )
+        };
+    
+        // Forbid IPv4 fragmentation. Set even for IPv6 to account for IPv6 mapped IPv4 addresses.
+        let rc = unsafe {
+            libc::setsockopt(
+                io.as_raw_fd(),
+                libc::IPPROTO_IP,
+                libc::IP_MTU_DISCOVER,
+                &libc::IP_PMTUDISC_DONT as *const _ as _,
+                // &libc::IP_PMTUDISC_PROBE as *const _ as _,
+                mem::size_of_val(&libc::IP_PMTUDISC_PROBE) as _,
+            )
+        };
+        if rc == -1 {
+            return Err(io::Error::last_os_error());
+        }
+    
+        if is_ipv4 {
+            let on: libc::c_int = 1;
+            let rc = unsafe {
+                libc::setsockopt(
+                    io.as_raw_fd(),
+                    libc::IPPROTO_IP,
+                    libc::IP_PKTINFO,
+                    &on as *const _ as _,
+                    mem::size_of_val(&on) as _,
+                )
+            };
+            if rc == -1 {
+                return Err(io::Error::last_os_error());
+            }
+        } else {
+            let rc = unsafe {
+                libc::setsockopt(
+                    io.as_raw_fd(),
+                    libc::IPPROTO_IPV6,
+                    libc::IPV6_MTU_DISCOVER,
+                    &libc::IP_PMTUDISC_PROBE as *const _ as _,
+                    mem::size_of_val(&libc::IP_PMTUDISC_PROBE) as _,
+                )
+            };
+            if rc == -1 {
+                return Err(io::Error::last_os_error());
+            }
+    
+            let on: libc::c_int = 1;
+            let rc = unsafe {
+                libc::setsockopt(
+                    io.as_raw_fd(),
+                    libc::IPPROTO_IPV6,
+                    libc::IPV6_RECVPKTINFO,
+                    &on as *const _ as _,
+                    mem::size_of_val(&on) as _,
+                )
+            };
+            if rc == -1 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+    }
     // if !is_ipv4 {
     //     let on: libc::c_int = 1;
     //     let rc = unsafe {
