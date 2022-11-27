@@ -3,40 +3,49 @@ use std::{
     net::{IpAddr, Ipv6Addr, SocketAddr},
     num::ParseIntError,
     str::FromStr,
-    sync::Arc,
+    sync::Arc, io::Cursor,
 };
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::Parser;
-use quinn_proto::{transport_parameters::TransportParameters, ConnectionId, Side, TransportError, crypto::{Session, Keys, HeaderKey, PacketKey, KeyPair, ExportKeyingMaterialError, UnsupportedVersion}};
+use ed25519_dalek::Keypair;
+use quinn_proto::{transport_parameters::TransportParameters, ConnectionId, Side, TransportError, crypto::{Session, Keys, HeaderKey, PacketKey, KeyPair, ExportKeyingMaterialError, UnsupportedVersion}, TransportErrorCode};
+use rand::rngs::OsRng;
 use rustls::RootCertStore;
 use tokio::runtime::{Builder, Runtime};
 use tracing::trace;
 
 pub mod stats;
 
-struct NoopKey;
+#[derive(Debug)]
+struct PlaintextKey;
 
-impl HeaderKey for NoopKey {
+impl HeaderKey for PlaintextKey {
+    #[tracing::instrument(level = "info", skip(packet))]
     fn decrypt(&self, pn_offset: usize, packet: &mut [u8]) {
         println!("decrypting packet {} {}", pn_offset, packet.len());
     }
 
+    #[tracing::instrument(level = "info", skip(packet))]
     fn encrypt(&self, pn_offset: usize, packet: &mut [u8]) {
         println!("encrypting packet {} {}", pn_offset, packet.len());
     }
 
+    #[tracing::instrument(level = "info")]
     fn sample_size(&self) -> usize {
-        usize::MAX
+        0
     }
 }
 
-impl PacketKey for NoopKey {
+impl PacketKey for PlaintextKey {
+
+    #[tracing::instrument(level = "info", skip(buf))]
     fn encrypt(&self, packet: u64, buf: &mut [u8], header_len: usize) {
         println!("encrypting packet {} {} {}", packet, buf.len(), header_len);
     }
 
+    #[tracing::instrument(level = "info", skip(payload))]
     fn decrypt(
         &self,
         packet: u64,
@@ -47,21 +56,57 @@ impl PacketKey for NoopKey {
         Ok(())
     }
 
+    #[tracing::instrument(level = "info")]
     fn tag_len(&self) -> usize {
         0
     }
 
+    #[tracing::instrument(level = "info")]
     fn confidentiality_limit(&self) -> u64 {
         u64::MAX
     }
 
+    #[tracing::instrument(level = "info")]
     fn integrity_limit(&self) -> u64 {
         u64::MAX
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum State {
+    Initial,
+    ZeroRtt,
+    Handshake,
+    OneRtt,
+    Data,
+}
+
 #[derive(Debug)]
-struct NoCryptoSession;
+struct NoCryptoSession {
+    state: State,
+    side: Side,
+    transport_parameters: TransportParameters,
+    remote_transport_parameters: Option<TransportParameters>,
+}
+
+impl NoCryptoSession {
+    fn new(side: Side, transport_parameters: TransportParameters) -> Self {
+        Self {
+            state: State::Initial,
+            side,
+            transport_parameters,
+            remote_transport_parameters: None,
+        }
+    }
+}
+
+fn connection_refused(reason: &str) -> TransportError {
+    TransportError {
+        code: TransportErrorCode::CONNECTION_REFUSED,
+        frame: None,
+        reason: reason.to_string(),
+    }
+}
 
 impl Session for NoCryptoSession {
     #[tracing::instrument(level = "info")]
@@ -69,14 +114,65 @@ impl Session for NoCryptoSession {
         println!("initial_keys: dst_cid={:?}, side={:?}", dst_cid, side);
         Keys {
             header: KeyPair {
-                local: Box::new(NoopKey),
-                remote: Box::new(NoopKey),
+                local: Box::new(PlaintextKey),
+                remote: Box::new(PlaintextKey),
             },
             packet: KeyPair {
-                local: Box::new(NoopKey),
-                remote: Box::new(NoopKey),
+                local: Box::new(PlaintextKey),
+                remote: Box::new(PlaintextKey),
             }
         }
+    }
+
+    #[tracing::instrument(level = "info")]
+    fn next_1rtt_keys(&mut self) -> Option<KeyPair<Box<dyn PacketKey>>> {
+        println!("next_1rtt_keys");
+        None
+    }
+
+    #[tracing::instrument(level = "info")]
+    fn read_handshake(&mut self, handshake: &[u8]) -> Result<bool, TransportError> {
+        println!("read_handshake: buf={:?}", handshake);
+        tracing::trace!("read_handshake {:?} {:?}", self.state, self.side);
+        match (self.state, self.side) {
+            (State::Initial, Side::Server) => {
+                // protocol identifier
+                if !handshake.is_empty() {
+                    return Err(connection_refused("invalid crypto frame"));
+                }
+                let mut transport_parameters = handshake;
+                self.remote_transport_parameters = Some(TransportParameters::read(
+                    Side::Server,
+                    &mut Cursor::new(&mut transport_parameters),
+                )?);
+                self.state = State::ZeroRtt;
+                Ok(true)
+            }
+            (State::Handshake, Side::Client) => {
+                // e
+                if handshake.len() != 0 {
+                    return Err(connection_refused("invalid crypto frame"));
+                }
+                let mut transport_parameters = handshake;
+                self.remote_transport_parameters = Some(TransportParameters::read(
+                    Side::Client,
+                    &mut Cursor::new(&mut transport_parameters),
+                )?);
+                self.state = State::OneRtt;
+                Ok(true)
+            }
+            _ => Err(TransportError {
+                code: TransportErrorCode::CONNECTION_REFUSED,
+                frame: None,
+                reason: "unexpected crypto frame".to_string(),
+            }),
+        }
+    }
+
+    #[tracing::instrument(level = "info")]
+    fn write_handshake(&mut self, buf: &mut Vec<u8>) -> Option<Keys> {
+        println!("write_handshake: buf={:?}", buf);
+        None
     }
 
     #[tracing::instrument(level = "info")]
@@ -94,7 +190,7 @@ impl Session for NoCryptoSession {
     #[tracing::instrument(level = "info")]
     fn early_crypto(&self) -> Option<(Box<dyn HeaderKey>, Box<dyn PacketKey>)> {
         println!("early_crypto");
-        None
+        Some((Box::new(PlaintextKey), Box::new(PlaintextKey)))
     }
 
     #[tracing::instrument(level = "info")]
@@ -105,32 +201,13 @@ impl Session for NoCryptoSession {
 
     #[tracing::instrument(level = "info")]
     fn is_handshaking(&self) -> bool {
-        println!("is_handshaking");
-        false
-    }
-
-    #[tracing::instrument(level = "info")]
-    fn read_handshake(&mut self, buf: &[u8]) -> Result<bool, TransportError> {
-        println!("read_handshake: buf={:?}", buf);
-        Ok(true)
+        self.state != State::Data
     }
 
     #[tracing::instrument(level = "info")]
     fn transport_parameters(&self) -> Result<Option<TransportParameters>, quinn_proto::TransportError> {
         println!("transport_parameters");
         Ok(None)
-    }
-
-    #[tracing::instrument(level = "info")]
-    fn write_handshake(&mut self, buf: &mut Vec<u8>) -> Option<Keys> {
-        println!("write_handshake: buf={:?}", buf);
-        None
-    }
-
-    #[tracing::instrument(level = "info")]
-    fn next_1rtt_keys(&mut self) -> Option<KeyPair<Box<dyn PacketKey>>> {
-        println!("next_1rtt_keys");
-        None
     }
 
     #[tracing::instrument(level = "info")]
@@ -166,12 +243,12 @@ impl quinn_proto::crypto::ServerConfig for NoCryptoServerConfig {
         println!("server initial_keys");
         Ok(Keys {
             header: KeyPair {
-                local: Box::new(NoopKey),
-                remote: Box::new(NoopKey),
+                local: Box::new(PlaintextKey),
+                remote: Box::new(PlaintextKey),
             },
             packet: KeyPair {
-                local: Box::new(NoopKey),
-                remote: Box::new(NoopKey),
+                local: Box::new(PlaintextKey),
+                remote: Box::new(PlaintextKey),
             }
         })
     }
@@ -188,7 +265,7 @@ impl quinn_proto::crypto::ServerConfig for NoCryptoServerConfig {
         params: &TransportParameters,
     ) -> Box<dyn Session> {
         println!("server start_session");
-        Box::new(NoCryptoSession)
+        Box::new(NoCryptoSession::new(Side::Server, params.clone()))
     }
 }
 
@@ -205,7 +282,7 @@ impl quinn_proto::crypto::ClientConfig for NoCryptoClientConfig {
         params: &TransportParameters,
     ) -> Result<Box<dyn Session>, quinn::ConnectError> {
         println!("client start_session");
-        Ok(Box::new(NoCryptoSession))
+        Ok(Box::new(NoCryptoSession::new(Side::Client, params.clone())))
     }
 }
 
@@ -225,12 +302,19 @@ pub fn server_endpoint(
     rt: &tokio::runtime::Runtime,
     cert: rustls::Certificate,
     key: rustls::PrivateKey,
+    keypair: ed25519_dalek::Keypair,
     opt: &Opt,
 ) -> (SocketAddr, quinn::Endpoint) {
     let cert_chain = vec![cert];
     let mut server_config = quinn::ServerConfig::with_single_cert(cert_chain, key).unwrap();
     server_config.transport = Arc::new(transport_config(opt));
     server_config.crypto = Arc::new(NoCryptoServerConfig);
+    server_config.crypto = Arc::new(quinn_noise::NoiseConfig::from(quinn_noise::NoiseServerConfig {
+        keypair,
+        keylogger: None,
+        psk: None,
+        supported_protocols: vec![b"bench".to_vec()]
+    }));
 
     let endpoint = {
         let _guard = rt.enter();
@@ -248,11 +332,13 @@ pub fn server_endpoint(
 pub async fn connect_client(
     server_addr: SocketAddr,
     server_cert: rustls::Certificate,
+    remote_public_key: ed25519_dalek::PublicKey,
     opt: Opt,
 ) -> Result<(quinn::Endpoint, quinn::Connection)> {
     let endpoint =
         quinn::Endpoint::client(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0)).unwrap();
-
+    let mut csprng = OsRng{};
+    let keypair: Keypair = Keypair::generate(&mut csprng);
     let mut roots = RootCertStore::empty();
     roots.add(&server_cert)?;
     let crypto = rustls::ClientConfig::builder()
@@ -262,8 +348,17 @@ pub async fn connect_client(
         .unwrap()
         .with_root_certificates(roots)
         .with_no_client_auth();
+    
+    let crypto = quinn_noise::NoiseConfig::from(quinn_noise::NoiseClientConfig {
+        remote_public_key,
+        alpn: b"bench".to_vec(),
+        keypair,
+        psk: None,
+        keylogger: None,
+    });
 
-    let mut client_config = quinn::ClientConfig::new(Arc::new(NoCryptoClientConfig));
+    // let mut client_config = quinn::ClientConfig::new(Arc::new(NoCryptoClientConfig));
+    let mut client_config = quinn::ClientConfig::new(Arc::new(crypto));
     client_config.transport_config(Arc::new(transport_config(&opt)));
 
     let connection = endpoint

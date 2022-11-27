@@ -17,3 +17,6 @@ tokio = { version = "1.0.1", features = ["rt", "sync"] }
 tracing = "0.1.10"
 tracing-subscriber = { version = "0.3.0", default-features = false, features = ["env-filter", "fmt", "ansi", "time", "local-time"] }
 quinn-proto = "0.9.1"
+quinn-noise = { git = "https://github.com/rklaehn/quinn-noise", branch = "update-quinn-version" }
+rand = "0.7.3"
+ed25519-dalek = "1.0.1"

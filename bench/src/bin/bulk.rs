@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use ed25519_dalek::Keypair;
 use tokio::sync::Semaphore;
 use tracing::{info, trace};
 
@@ -23,9 +24,12 @@ fn main() {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let key = rustls::PrivateKey(cert.serialize_private_key_der());
     let cert = rustls::Certificate(cert.serialize_der().unwrap());
+    let mut csprng = rand::rngs::OsRng{};
+    let keypair: ed25519_dalek::Keypair = ed25519_dalek::Keypair::generate(&mut csprng);
+    let public_key: ed25519_dalek::PublicKey = keypair.public;
 
     let runtime = rt();
-    let (server_addr, endpoint) = server_endpoint(&runtime, cert.clone(), key, &opt);
+    let (server_addr, endpoint) = server_endpoint(&runtime, cert.clone(), key, keypair, &opt);
 
     let server_thread = std::thread::spawn(move || {
         if let Err(e) = runtime.block_on(server(endpoint, opt)) {
@@ -38,7 +42,7 @@ fn main() {
         let cert = cert.clone();
         handles.push(std::thread::spawn(move || {
             let runtime = rt();
-            match runtime.block_on(client(server_addr, cert, opt)) {
+            match runtime.block_on(client(server_addr, cert, public_key, opt)) {
                 Ok(stats) => Ok(stats),
                 Err(e) => {
                     eprintln!("client failed: {:#}", e);
@@ -106,9 +110,10 @@ async fn server(endpoint: quinn::Endpoint, opt: Opt) -> Result<()> {
 async fn client(
     server_addr: SocketAddr,
     server_cert: rustls::Certificate,
+    remote_public_key: ed25519_dalek::PublicKey,
     opt: Opt,
 ) -> Result<ClientStats> {
-    let (endpoint, connection) = connect_client(server_addr, server_cert, opt).await?;
+    let (endpoint, connection) = connect_client(server_addr, server_cert, remote_public_key, opt).await?;
 
     let start = Instant::now();
 
