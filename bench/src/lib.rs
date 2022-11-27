@@ -9,16 +9,212 @@ use std::{
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::Parser;
+use quinn_proto::{transport_parameters::TransportParameters, ConnectionId, Side, TransportError, crypto::{Session, Keys, HeaderKey, PacketKey, KeyPair, ExportKeyingMaterialError, UnsupportedVersion}};
 use rustls::RootCertStore;
 use tokio::runtime::{Builder, Runtime};
 use tracing::trace;
 
 pub mod stats;
 
+struct NoopKey;
+
+impl HeaderKey for NoopKey {
+    fn decrypt(&self, pn_offset: usize, packet: &mut [u8]) {
+        println!("decrypting packet {} {}", pn_offset, packet.len());
+    }
+
+    fn encrypt(&self, pn_offset: usize, packet: &mut [u8]) {
+        println!("encrypting packet {} {}", pn_offset, packet.len());
+    }
+
+    fn sample_size(&self) -> usize {
+        usize::MAX
+    }
+}
+
+impl PacketKey for NoopKey {
+    fn encrypt(&self, packet: u64, buf: &mut [u8], header_len: usize) {
+        println!("encrypting packet {} {} {}", packet, buf.len(), header_len);
+    }
+
+    fn decrypt(
+        &self,
+        packet: u64,
+        header: &[u8],
+        payload: &mut bytes::BytesMut,
+    ) -> Result<(), quinn_proto::crypto::CryptoError> {
+        println!("decrypting packet {} {} {}", packet, header.len(), payload.len());
+        Ok(())
+    }
+
+    fn tag_len(&self) -> usize {
+        0
+    }
+
+    fn confidentiality_limit(&self) -> u64 {
+        u64::MAX
+    }
+
+    fn integrity_limit(&self) -> u64 {
+        u64::MAX
+    }
+}
+
+#[derive(Debug)]
+struct NoCryptoSession;
+
+impl Session for NoCryptoSession {
+    #[tracing::instrument(level = "info")]
+    fn initial_keys(&self, dst_cid: &ConnectionId, side: Side) -> Keys {
+        println!("initial_keys: dst_cid={:?}, side={:?}", dst_cid, side);
+        Keys {
+            header: KeyPair {
+                local: Box::new(NoopKey),
+                remote: Box::new(NoopKey),
+            },
+            packet: KeyPair {
+                local: Box::new(NoopKey),
+                remote: Box::new(NoopKey),
+            }
+        }
+    }
+
+    #[tracing::instrument(level = "info")]
+    fn handshake_data(&self) -> Option<Box<dyn std::any::Any>> {
+        println!("handshake_data");
+        None
+    }
+
+    #[tracing::instrument(level = "info")]
+    fn peer_identity(&self) -> Option<Box<dyn std::any::Any>> {
+        println!("peer_identity");
+        None
+    }
+
+    #[tracing::instrument(level = "info")]
+    fn early_crypto(&self) -> Option<(Box<dyn HeaderKey>, Box<dyn PacketKey>)> {
+        println!("early_crypto");
+        None
+    }
+
+    #[tracing::instrument(level = "info")]
+    fn early_data_accepted(&self) -> Option<bool> {
+        println!("early_data_accepted");
+        Some(true)
+    }
+
+    #[tracing::instrument(level = "info")]
+    fn is_handshaking(&self) -> bool {
+        println!("is_handshaking");
+        false
+    }
+
+    #[tracing::instrument(level = "info")]
+    fn read_handshake(&mut self, buf: &[u8]) -> Result<bool, TransportError> {
+        println!("read_handshake: buf={:?}", buf);
+        Ok(true)
+    }
+
+    #[tracing::instrument(level = "info")]
+    fn transport_parameters(&self) -> Result<Option<TransportParameters>, quinn_proto::TransportError> {
+        println!("transport_parameters");
+        Ok(None)
+    }
+
+    #[tracing::instrument(level = "info")]
+    fn write_handshake(&mut self, buf: &mut Vec<u8>) -> Option<Keys> {
+        println!("write_handshake: buf={:?}", buf);
+        None
+    }
+
+    #[tracing::instrument(level = "info")]
+    fn next_1rtt_keys(&mut self) -> Option<KeyPair<Box<dyn PacketKey>>> {
+        println!("next_1rtt_keys");
+        None
+    }
+
+    #[tracing::instrument(level = "info")]
+    fn is_valid_retry(&self, orig_dst_cid: &ConnectionId, header: &[u8], payload: &[u8]) -> bool {
+        println!("is_valid_retry: orig_dst_cid={:?}, header={:?}, payload={:?}", orig_dst_cid, header, payload);
+        false
+    }
+
+    #[tracing::instrument(level = "info")]
+    fn export_keying_material(
+        &self,
+        output: &mut [u8],
+        label: &[u8],
+        context: &[u8],
+    ) -> Result<(), ExportKeyingMaterialError> {
+        println!("export_keying_material: output={:?}, label={:?}, context={:?}", output, label, context);
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct NoCryptoServerConfig;
+
+impl quinn_proto::crypto::ServerConfig for NoCryptoServerConfig {
+
+    #[tracing::instrument(level = "info")]
+    fn initial_keys(
+        &self,
+        version: u32,
+        dst_cid: &ConnectionId,
+        side: Side,
+    ) -> Result<Keys, UnsupportedVersion> {
+        println!("server initial_keys");
+        Ok(Keys {
+            header: KeyPair {
+                local: Box::new(NoopKey),
+                remote: Box::new(NoopKey),
+            },
+            packet: KeyPair {
+                local: Box::new(NoopKey),
+                remote: Box::new(NoopKey),
+            }
+        })
+    }
+
+    #[tracing::instrument(level = "info")]
+    fn retry_tag(&self, version: u32, orig_dst_cid: &ConnectionId, packet: &[u8]) -> [u8; 16] {
+        [0; 16]
+    }
+
+    #[tracing::instrument(level = "info")]
+    fn start_session(
+        self: Arc<Self>,
+        version: u32,
+        params: &TransportParameters,
+    ) -> Box<dyn Session> {
+        println!("server start_session");
+        Box::new(NoCryptoSession)
+    }
+}
+
+#[derive(Debug)]
+struct NoCryptoClientConfig;
+
+impl quinn_proto::crypto::ClientConfig for NoCryptoClientConfig {
+
+    #[tracing::instrument(level = "info")]
+    fn start_session(
+        self: Arc<Self>,
+        version: u32,
+        server_name: &str,
+        params: &TransportParameters,
+    ) -> Result<Box<dyn Session>, quinn::ConnectError> {
+        println!("client start_session");
+        Ok(Box::new(NoCryptoSession))
+    }
+}
+
 pub fn configure_tracing_subscriber() {
+    let filter = tracing_subscriber::EnvFilter::from_default_env();
+    println!("{:?}", filter);
     tracing::subscriber::set_global_default(
         tracing_subscriber::FmtSubscriber::builder()
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_env_filter(filter)
             .finish(),
     )
     .unwrap();
@@ -34,6 +230,7 @@ pub fn server_endpoint(
     let cert_chain = vec![cert];
     let mut server_config = quinn::ServerConfig::with_single_cert(cert_chain, key).unwrap();
     server_config.transport = Arc::new(transport_config(opt));
+    server_config.crypto = Arc::new(NoCryptoServerConfig);
 
     let endpoint = {
         let _guard = rt.enter();
@@ -66,7 +263,7 @@ pub async fn connect_client(
         .with_root_certificates(roots)
         .with_no_client_auth();
 
-    let mut client_config = quinn::ClientConfig::new(Arc::new(crypto));
+    let mut client_config = quinn::ClientConfig::new(Arc::new(NoCryptoClientConfig));
     client_config.transport_config(Arc::new(transport_config(&opt)));
 
     let connection = endpoint
