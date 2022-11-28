@@ -72,6 +72,7 @@ impl quinn::AsyncUdpSocket for UdsDatagramSocket {
             )));
         };
         if transmits[0].segment_size.is_some() {
+            println!("segment_size {} {}", transmits[0].segment_size.unwrap(), transmits[0].contents.len());
             return Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "segment size not supported",
