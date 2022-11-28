@@ -20,8 +20,8 @@ use tokio::{
 };
 use tracing::trace;
 
-const MAX_UDP_PAYLOAD_SIZE: u64 = 2048;
-const INITIAL_MAX_UDP_PAYLOAD_SIZE: u16 = 2048;
+const MAX_UDP_PAYLOAD_SIZE: u64 = 1200;
+const INITIAL_MAX_UDP_PAYLOAD_SIZE: u16 = 1200;
 
 #[derive(Debug)]
 struct UdsDatagramSocketInner {
@@ -83,7 +83,7 @@ impl quinn::AsyncUdpSocket for UdsDatagramSocket {
         buf.extend_from_slice(&t0.contents);
 
         if t0.segment_size.is_some() {
-            println!("segment_size {} {}", transmits[0].segment_size.unwrap(), t0.contents.len());
+            // println!("segment_size {} {}", transmits[0].segment_size.unwrap(), t0.contents.len());
         };
         if t0.src_ip.is_some() {
             return Poll::Ready(Err(std::io::Error::new(
@@ -92,12 +92,12 @@ impl quinn::AsyncUdpSocket for UdsDatagramSocket {
             )));
         };
         if t0.ecn.is_some() {
-            println!("{:?}", t0.ecn.unwrap());
+            // println!("{:?}", t0.ecn.unwrap());
         };
         // package and send one packet
         match inner.socket.poll_send(cx, &buf) {
             Poll::Ready(Ok(n)) => Poll::Ready(if n == buf.len() {
-                println!("send {} bytes", n);
+                // println!("send {} bytes", n);
                 Ok(1)
             } else {
                 println!("nope! {} {}", n, buf.len());
@@ -118,7 +118,7 @@ impl quinn::AsyncUdpSocket for UdsDatagramSocket {
         meta: &mut [RecvMeta],
     ) -> std::task::Poll<std::io::Result<usize>> {
         let inner = &self.0;
-        println!("poll_recv");
+        // println!("poll_recv");
         if bufs.is_empty() {
             return Poll::Ready(Ok(0));
         }
@@ -132,15 +132,15 @@ impl quinn::AsyncUdpSocket for UdsDatagramSocket {
         let mut buf = ReadBuf::new(&mut tmp);
         match self.0.socket.poll_recv(cx, &mut buf) {
             Poll::Ready(Ok(_)) => {
-                println!("recv {} bytes", buf.filled().len());
+                // println!("recv {} bytes", buf.filled().len());
                 let data = buf.filled();
                 let ecn = data[0];
                 let stride = u64::from_be_bytes(data[1..9].try_into().unwrap()) as usize;
                 let data = data[9..].to_vec();
                 let ecn = quinn_proto::EcnCodepoint::from_bits(ecn);
-                println!("ecn {:?}", ecn);
-                println!("stride {}", stride);
-                println!("data {} bytes", data.len());
+                // println!("ecn {:?}", ecn);
+                // println!("stride {}", stride);
+                // println!("data {} bytes", data.len());
                 bufs[0][..data.len()].copy_from_slice(&data);
                 meta[0].len = data.len();
                 meta[0].dst_ip = None;
