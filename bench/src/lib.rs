@@ -69,7 +69,7 @@ impl quinn::AsyncUdpSocket for UdsDatagramSocket {
         }
         let inner = &self.0;
         let t0 = &transmits[0];
-        if transmits[0].destination != inner.remote_addr {
+        if t0.destination != inner.remote_addr {
             return Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "wrong destination",
@@ -133,11 +133,23 @@ impl quinn::AsyncUdpSocket for UdsDatagramSocket {
         match self.0.socket.poll_recv(cx, &mut buf) {
             Poll::Ready(Ok(_)) => {
                 // println!("recv {} bytes", buf.filled().len());
+                if buf.filled().len() < 9 {
+                    return Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "too short",
+                    )));
+                }
                 let data = buf.filled();
                 let ecn = data[0];
                 let stride = u64::from_be_bytes(data[1..9].try_into().unwrap()) as usize;
                 let data = data[9..].to_vec();
                 let ecn = quinn_proto::EcnCodepoint::from_bits(ecn);
+                if data.len() < stride {
+                    return Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "too short",
+                    )));
+                }
                 // println!("ecn {:?}", ecn);
                 // println!("stride {}", stride);
                 // println!("data {} bytes", data.len());
