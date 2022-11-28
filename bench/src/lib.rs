@@ -20,8 +20,8 @@ use tokio::{
 };
 use tracing::trace;
 
-const MAX_UDP_PAYLOAD_SIZE: u64 = 32768;
-const INITIAL_MAX_UDP_PAYLOAD_SIZE: u16 = 32768;
+const MAX_UDP_PAYLOAD_SIZE: u64 = 2048;
+const INITIAL_MAX_UDP_PAYLOAD_SIZE: u16 = 2048;
 
 #[derive(Debug)]
 struct UdsDatagramSocketInner {
@@ -98,8 +98,10 @@ impl quinn::AsyncUdpSocket for UdsDatagramSocket {
         let data = &transmits[0].contents;
         match inner.socket.poll_send(cx, data) {
             Poll::Ready(Ok(n)) => Poll::Ready(if n == data.len() {
+                println!("send {} bytes", n);
                 Ok(1)
             } else {
+                println!("nope! {} {}", n, data.len());
                 Err(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     "failed to send entire buffer",
