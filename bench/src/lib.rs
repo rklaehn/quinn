@@ -77,7 +77,7 @@ impl quinn::AsyncUdpSocket for UdsDatagramSocket {
         };
         let mut buf: Vec<u8> = Vec::with_capacity(t0.contents.len() + 8 + 1);
         let ecn_byte = t0.ecn.map(|x| x as u8).unwrap_or(0);
-        let segment_size = t0.segment_size.map(|x| x as u64).unwrap_or(0);
+        let segment_size = t0.segment_size.unwrap_or(t0.contents.len()) as u64;
         buf.push(ecn_byte);
         buf.extend_from_slice(&segment_size.to_be_bytes());
         buf.extend_from_slice(&t0.contents);
@@ -132,14 +132,15 @@ impl quinn::AsyncUdpSocket for UdsDatagramSocket {
         let mut buf = ReadBuf::new(&mut tmp);
         match self.0.socket.poll_recv(cx, &mut buf) {
             Poll::Ready(Ok(_)) => {
+                println!("recv {} bytes", buf.filled().len());
                 let data = buf.filled();
                 let ecn = data[0];
                 let stride = u64::from_be_bytes(data[1..9].try_into().unwrap()) as usize;
                 let data = data[9..].to_vec();
                 let ecn = quinn_proto::EcnCodepoint::from_bits(ecn);
-                println!("recv {} bytes", data.len());
                 println!("ecn {:?}", ecn);
                 println!("stride {}", stride);
+                println!("data {} bytes", data.len());
                 meta[0].len = buf.filled().len();
                 meta[0].dst_ip = None;
                 meta[0].ecn = ecn;
