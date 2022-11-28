@@ -21,6 +21,7 @@ use tokio::{
 use tracing::trace;
 
 const MAX_UDP_PAYLOAD_SIZE: u64 = 32768;
+const INITIAL_MAX_UDP_PAYLOAD_SIZE: u16 = 32768;
 
 #[derive(Debug)]
 struct UdsDatagramSocketInner {
@@ -287,6 +288,7 @@ pub fn transport_config(opt: &Opt) -> quinn::TransportConfig {
     // is configurable as a parameter.
     let mut config = quinn::TransportConfig::default();
     config.max_concurrent_uni_streams(opt.max_streams.try_into().unwrap());
+    config.initial_max_udp_payload_size(INITIAL_MAX_UDP_PAYLOAD_SIZE);
     config
 }
 
