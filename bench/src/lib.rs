@@ -128,14 +128,23 @@ impl quinn::AsyncUdpSocket for UdsDatagramSocket {
                 "bufs and meta must be the same length",
             )));
         }
-        let mut buf = ReadBuf::new(&mut bufs[0]);
+        let mut tmp = [0u8; 32768];
+        let mut buf = ReadBuf::new(&mut tmp);
         match self.0.socket.poll_recv(cx, &mut buf) {
             Poll::Ready(Ok(_)) => {
+                let data = buf.filled();
+                let ecn = data[0];
+                let stride = u64::from_be_bytes(data[1..9].try_into().unwrap()) as usize;
+                let data = data[9..].to_vec();
+                let ecn = quinn_proto::EcnCodepoint::from_bits(ecn);
+                println!("recv {} bytes", data.len());
+                println!("ecn {:?}", ecn);
+                println!("stride {}", stride);
                 meta[0].len = buf.filled().len();
                 meta[0].dst_ip = None;
-                meta[0].ecn = None;
+                meta[0].ecn = ecn;
                 meta[0].addr = inner.remote_addr;
-                meta[0].stride = buf.filled().len();
+                meta[0].stride = stride;
                 Poll::Ready(Ok(1))
             }
             Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
