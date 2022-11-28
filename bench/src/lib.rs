@@ -1,17 +1,146 @@
 use std::{
     convert::TryInto,
+    io::{self, IoSliceMut},
     net::{IpAddr, Ipv6Addr, SocketAddr},
     num::ParseIntError,
     str::FromStr,
     sync::Arc,
+    task::{self, Poll},
 };
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::Parser;
+use quinn::{EndpointConfig, TokioRuntime};
+use quinn_udp::{RecvMeta, UdpState};
 use rustls::RootCertStore;
-use tokio::runtime::{Builder, Runtime};
+use tokio::{
+    io::ReadBuf,
+    runtime::{Builder, Runtime},
+};
 use tracing::trace;
+
+#[derive(Debug)]
+struct UdsDatagramSocketInner {
+    local_addr: SocketAddr,
+    remote_addr: SocketAddr,
+    socket: tokio::net::UnixDatagram,
+}
+
+#[derive(Debug)]
+pub struct UdsDatagramSocket(Arc<UdsDatagramSocketInner>);
+
+impl UdsDatagramSocket {
+    pub fn new(
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        socket: tokio::net::UnixDatagram,
+    ) -> Self {
+        Self(Arc::new(UdsDatagramSocketInner {
+            local_addr,
+            remote_addr,
+            socket,
+        }))
+    }
+
+    pub fn pair() -> io::Result<(Self, Self)> {
+        let (a, b) = tokio::net::UnixDatagram::pair()?;
+        let local_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 1);
+        let remote_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 2);
+        Ok((
+            Self::new(local_addr, remote_addr, a),
+            Self::new(remote_addr, local_addr, b),
+        ))
+    }
+}
+
+impl quinn::AsyncUdpSocket for UdsDatagramSocket {
+    fn poll_send(
+        &mut self,
+        _: &UdpState,
+        cx: &mut std::task::Context,
+        transmits: &[quinn::Transmit],
+    ) -> std::task::Poll<Result<usize, std::io::Error>> {
+        if transmits.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        let inner = &self.0;
+        if transmits[0].destination != inner.remote_addr {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "wrong destination",
+            )));
+        };
+        if transmits[0].segment_size.is_some() {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "segment size not supported",
+            )));
+        };
+        if transmits[0].src_ip.is_some() {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "src ip not supported",
+            )));
+        };
+        if transmits[0].ecn.is_some() {
+            println!("{:?}", transmits[0].ecn.unwrap());
+            // return Poll::Ready(Err(std::io::Error::new(
+            //     std::io::ErrorKind::Other,
+            //     "ecn not supported",
+            // )));
+        };
+        // package and send one packet
+        let data = &transmits[0].contents;
+        match inner.socket.poll_send(cx, data) {
+            Poll::Ready(Ok(n)) => Poll::Ready(if n == data.len() {
+                Ok(1)
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "failed to send entire buffer",
+                ))
+            }),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn poll_recv(
+        &self,
+        cx: &mut task::Context,
+        bufs: &mut [IoSliceMut<'_>],
+        meta: &mut [RecvMeta],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let inner = &self.0;
+        if bufs.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        if bufs.len() != meta.len() {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "bufs and meta must be the same length",
+            )));
+        }
+        let mut buf = ReadBuf::new(&mut bufs[0]);
+        match self.0.socket.poll_recv(cx, &mut buf) {
+            Poll::Ready(Ok(_)) => {
+                meta[0].len = buf.filled().len();
+                meta[0].dst_ip = None;
+                meta[0].ecn = None;
+                meta[0].addr = inner.remote_addr;
+                meta[0].stride = buf.filled().len();
+                Poll::Ready(Ok(1))
+            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        Ok(self.0.local_addr)
+    }
+}
 
 pub mod stats;
 
@@ -29,6 +158,7 @@ pub fn server_endpoint(
     rt: &tokio::runtime::Runtime,
     cert: rustls::Certificate,
     key: rustls::PrivateKey,
+    socket: UdsDatagramSocket,
     opt: &Opt,
 ) -> (SocketAddr, quinn::Endpoint) {
     let cert_chain = vec![cert];
@@ -37,9 +167,12 @@ pub fn server_endpoint(
 
     let endpoint = {
         let _guard = rt.enter();
-        quinn::Endpoint::server(
-            server_config,
-            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0),
+        let endpoint_config = EndpointConfig::default();
+        quinn::Endpoint::new_with_abstract_socket(
+            endpoint_config,
+            Some(server_config),
+            socket,
+            TokioRuntime,
         )
         .unwrap()
     };
@@ -51,10 +184,14 @@ pub fn server_endpoint(
 pub async fn connect_client(
     server_addr: SocketAddr,
     server_cert: rustls::Certificate,
+    socket: UdsDatagramSocket,
     opt: Opt,
 ) -> Result<(quinn::Endpoint, quinn::Connection)> {
+    let endpoint_config = EndpointConfig::default();
     let endpoint =
-        quinn::Endpoint::client(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0)).unwrap();
+        quinn::Endpoint::new_with_abstract_socket(endpoint_config, None, socket, TokioRuntime)
+            .unwrap();
+    // quinn::Endpoint::client(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0)).unwrap();
 
     let mut roots = RootCertStore::empty();
     roots.add(&server_cert)?;

@@ -13,7 +13,7 @@ use bench::{
     configure_tracing_subscriber, connect_client, drain_stream, rt, send_data_on_stream,
     server_endpoint,
     stats::{Stats, TransferResult},
-    Opt,
+    Opt, UdsDatagramSocket,
 };
 
 fn main() {
@@ -25,7 +25,11 @@ fn main() {
     let cert = rustls::Certificate(cert.serialize_der().unwrap());
 
     let runtime = rt();
-    let (server_addr, endpoint) = server_endpoint(&runtime, cert.clone(), key, &opt);
+    let (sa, sb) = {
+        let _guard = runtime.enter();
+        UdsDatagramSocket::pair().unwrap()
+    };
+    let (server_addr, endpoint) = server_endpoint(&runtime, cert.clone(), key, sa, &opt);
 
     let server_thread = std::thread::spawn(move || {
         if let Err(e) = runtime.block_on(server(endpoint, opt)) {
@@ -33,20 +37,19 @@ fn main() {
         }
     });
 
+    assert!(opt.clients == 1);
     let mut handles = Vec::new();
-    for _ in 0..opt.clients {
-        let cert = cert.clone();
-        handles.push(std::thread::spawn(move || {
-            let runtime = rt();
-            match runtime.block_on(client(server_addr, cert, opt)) {
-                Ok(stats) => Ok(stats),
-                Err(e) => {
-                    eprintln!("client failed: {:#}", e);
-                    Err(e)
-                }
+    let cert = cert;
+    handles.push(std::thread::spawn(move || {
+        let runtime = rt();
+        match runtime.block_on(client(server_addr, cert, sb, opt)) {
+            Ok(stats) => Ok(stats),
+            Err(e) => {
+                eprintln!("client failed: {:#}", e);
+                Err(e)
             }
-        }));
-    }
+        }
+    }));
 
     for (id, handle) in handles.into_iter().enumerate() {
         // We print all stats at the end of the test sequentially to avoid
@@ -106,9 +109,10 @@ async fn server(endpoint: quinn::Endpoint, opt: Opt) -> Result<()> {
 async fn client(
     server_addr: SocketAddr,
     server_cert: rustls::Certificate,
+    socket: UdsDatagramSocket,
     opt: Opt,
 ) -> Result<ClientStats> {
-    let (endpoint, connection) = connect_client(server_addr, server_cert, opt).await?;
+    let (endpoint, connection) = connect_client(server_addr, server_cert, socket, opt).await?;
 
     let start = Instant::now();
 
