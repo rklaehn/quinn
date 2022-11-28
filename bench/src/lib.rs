@@ -82,17 +82,17 @@ impl quinn::AsyncUdpSocket for UdsDatagramSocket {
         buf.extend_from_slice(&segment_size.to_be_bytes());
         buf.extend_from_slice(&t0.contents);
 
-        if transmits[0].segment_size.is_some() {
-            println!("segment_size {} {}", transmits[0].segment_size.unwrap(), transmits[0].contents.len());
+        if t0.segment_size.is_some() {
+            println!("segment_size {} {}", transmits[0].segment_size.unwrap(), t0.contents.len());
         };
-        if transmits[0].src_ip.is_some() {
+        if t0.src_ip.is_some() {
             return Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "src ip not supported",
             )));
         };
-        if transmits[0].ecn.is_some() {
-            println!("{:?}", transmits[0].ecn.unwrap());
+        if t0.ecn.is_some() {
+            println!("{:?}", t0.ecn.unwrap());
         };
         // package and send one packet
         match inner.socket.poll_send(cx, &buf) {
