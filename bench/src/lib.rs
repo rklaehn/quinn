@@ -4,7 +4,7 @@ use std::{
     net::{IpAddr, Ipv6Addr, SocketAddr},
     num::ParseIntError,
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, atomic::AtomicU64},
     task::{self, Poll},
 };
 
@@ -28,6 +28,8 @@ struct UdsDatagramSocketInner {
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
     socket: tokio::net::UnixDatagram,
+    sent: AtomicU64,
+    recv: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -43,6 +45,8 @@ impl UdsDatagramSocket {
             local_addr,
             remote_addr,
             socket,
+            sent: Default::default(),
+            recv: Default::default(),
         }))
     }
 
@@ -97,6 +101,7 @@ impl quinn::AsyncUdpSocket for UdsDatagramSocket {
         // package and send one packet
         match inner.socket.poll_send(cx, &buf) {
             Poll::Ready(Ok(n)) => Poll::Ready(if n == buf.len() {
+                inner.sent.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                 // println!("send {} bytes", n);
                 Ok(1)
             } else {
@@ -132,7 +137,7 @@ impl quinn::AsyncUdpSocket for UdsDatagramSocket {
         let mut buf = ReadBuf::new(&mut tmp);
         match self.0.socket.poll_recv(cx, &mut buf) {
             Poll::Ready(Ok(_)) => {
-                // println!("recv {} bytes", buf.filled().len());
+                println!("recv {} bytes {}", buf.filled().len(), inner.recv.load(std::sync::atomic::Ordering::Relaxed));
                 if buf.filled().len() < 9 {
                     return Poll::Ready(Err(std::io::Error::new(
                         std::io::ErrorKind::Other,
@@ -140,6 +145,7 @@ impl quinn::AsyncUdpSocket for UdsDatagramSocket {
                     )));
                 }
                 let data = buf.filled();
+                inner.recv.fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
                 let ecn = data[0];
                 let stride = u64::from_be_bytes(data[1..9].try_into().unwrap()) as usize;
                 let data = data[9..].to_vec();
