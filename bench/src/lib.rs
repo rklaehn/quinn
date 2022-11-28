@@ -141,7 +141,8 @@ impl quinn::AsyncUdpSocket for UdsDatagramSocket {
                 println!("ecn {:?}", ecn);
                 println!("stride {}", stride);
                 println!("data {} bytes", data.len());
-                meta[0].len = buf.filled().len();
+                bufs[0][..data.len()].copy_from_slice(&data);
+                meta[0].len = data.len();
                 meta[0].dst_ip = None;
                 meta[0].ecn = ecn;
                 meta[0].addr = inner.remote_addr;
