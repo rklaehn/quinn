@@ -68,18 +68,22 @@ impl quinn::AsyncUdpSocket for UdsDatagramSocket {
             return Poll::Ready(Ok(0));
         }
         let inner = &self.0;
+        let t0 = &transmits[0];
         if transmits[0].destination != inner.remote_addr {
             return Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "wrong destination",
             )));
         };
+        let mut buf: Vec<u8> = Vec::with_capacity(t0.contents.len() + 8 + 1);
+        let ecn_byte = t0.ecn.map(|x| x as u8).unwrap_or(0);
+        let segment_size = t0.segment_size.map(|x| x as u64).unwrap_or(0);
+        buf.push(ecn_byte);
+        buf.extend_from_slice(&segment_size.to_be_bytes());
+        buf.extend_from_slice(&t0.contents);
+
         if transmits[0].segment_size.is_some() {
             println!("segment_size {} {}", transmits[0].segment_size.unwrap(), transmits[0].contents.len());
-            return Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "segment size not supported",
-            )));
         };
         if transmits[0].src_ip.is_some() {
             return Poll::Ready(Err(std::io::Error::new(
@@ -89,19 +93,14 @@ impl quinn::AsyncUdpSocket for UdsDatagramSocket {
         };
         if transmits[0].ecn.is_some() {
             println!("{:?}", transmits[0].ecn.unwrap());
-            // return Poll::Ready(Err(std::io::Error::new(
-            //     std::io::ErrorKind::Other,
-            //     "ecn not supported",
-            // )));
         };
         // package and send one packet
-        let data = &transmits[0].contents;
-        match inner.socket.poll_send(cx, data) {
-            Poll::Ready(Ok(n)) => Poll::Ready(if n == data.len() {
+        match inner.socket.poll_send(cx, &buf) {
+            Poll::Ready(Ok(n)) => Poll::Ready(if n == buf.len() {
                 println!("send {} bytes", n);
                 Ok(1)
             } else {
-                println!("nope! {} {}", n, data.len());
+                println!("nope! {} {}", n, buf.len());
                 Err(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     "failed to send entire buffer",
