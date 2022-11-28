@@ -20,8 +20,8 @@ use tokio::{
 };
 use tracing::trace;
 
-const MAX_UDP_PAYLOAD_SIZE: u64 = 1200;
-const INITIAL_MAX_UDP_PAYLOAD_SIZE: u16 = 1200;
+const MAX_UDP_PAYLOAD_SIZE: u64 = 4096;
+const INITIAL_MAX_UDP_PAYLOAD_SIZE: u16 = 4096;
 
 #[derive(Debug)]
 struct UdsDatagramSocketInner {
