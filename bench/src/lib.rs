@@ -20,6 +20,8 @@ use tokio::{
 };
 use tracing::trace;
 
+const MAX_UDP_PAYLOAD_SIZE: u64 = 32768;
+
 #[derive(Debug)]
 struct UdsDatagramSocketInner {
     local_addr: SocketAddr,
@@ -168,7 +170,9 @@ pub fn server_endpoint(
 
     let endpoint = {
         let _guard = rt.enter();
-        let endpoint_config = EndpointConfig::default();
+        let mut endpoint_config = EndpointConfig::default();
+        endpoint_config.max_udp_payload_size(MAX_UDP_PAYLOAD_SIZE).unwrap();
+        println!("server endpoint {:?}", endpoint_config);
         quinn::Endpoint::new_with_abstract_socket(
             endpoint_config,
             Some(server_config),
@@ -188,7 +192,9 @@ pub async fn connect_client(
     socket: UdsDatagramSocket,
     opt: Opt,
 ) -> Result<(quinn::Endpoint, quinn::Connection)> {
-    let endpoint_config = EndpointConfig::default();
+    let mut endpoint_config = EndpointConfig::default();
+    endpoint_config.max_udp_payload_size(MAX_UDP_PAYLOAD_SIZE).unwrap();
+    println!("client endpoint {:?}", endpoint_config);
     let endpoint =
         quinn::Endpoint::new_with_abstract_socket(endpoint_config, None, socket, TokioRuntime)
             .unwrap();
