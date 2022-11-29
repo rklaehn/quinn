@@ -42,6 +42,10 @@ fn main() {
     let cert = cert;
     handles.push(std::thread::spawn(move || {
         let runtime = rt();
+        let sb = {
+            let _guard = runtime.enter();
+            sb.adsorb_runtime()
+        };
         match runtime.block_on(client(server_addr, cert, sb, opt)) {
             Ok(stats) => Ok(stats),
             Err(e) => {

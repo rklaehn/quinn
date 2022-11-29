@@ -4,7 +4,7 @@ use std::{
     net::{IpAddr, Ipv6Addr, SocketAddr},
     num::ParseIntError,
     str::FromStr,
-    sync::{Arc, atomic::AtomicU64},
+    sync::{atomic::AtomicU64, Arc},
     task::{self, Poll},
 };
 
@@ -12,16 +12,59 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::Parser;
 use quinn::{EndpointConfig, TokioRuntime};
+use quinn_proto::EcnCodepoint;
 use quinn_udp::{RecvMeta, UdpState};
 use rustls::RootCertStore;
+use serde::{Deserialize, Serialize};
 use tokio::{
     io::ReadBuf,
+    net::UnixDatagram,
     runtime::{Builder, Runtime},
 };
 use tracing::trace;
 
-const MAX_UDP_PAYLOAD_SIZE: u64 = 4096;
-const INITIAL_MAX_UDP_PAYLOAD_SIZE: u16 = 4096;
+const MAX_UDP_PAYLOAD_SIZE: u64 = 1200;
+const INITIAL_MAX_UDP_PAYLOAD_SIZE: u16 = 1200;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Packet<'a> {
+    /// The socket this datagram should be sent to
+    pub destination: SocketAddr,
+    /// Explicit congestion notification bits to set on the packet
+    pub ecn: u8,
+    /// Contents of the datagram
+    pub contents: &'a [u8],
+    /// The segment size if this transmission contains multiple datagrams.
+    /// This is `None` if the transmit only contains a single datagram
+    pub segment_size: Option<usize>,
+    /// Optional source IP address for the datagram
+    pub src_ip: Option<IpAddr>,
+    /// Optional target IP address for the datagram
+    pub dst_ip: Option<IpAddr>,
+}
+
+impl<'a> Packet<'a> {
+    fn from(transmit: &'a quinn::Transmit, dst_ip: Option<IpAddr>) -> Self {
+        Self {
+            destination: transmit.destination,
+            ecn: transmit.ecn.map(|ecn| ecn as u8).unwrap_or_default(),
+            contents: &transmit.contents,
+            segment_size: transmit.segment_size,
+            src_ip: transmit.src_ip,
+            dst_ip,
+        }
+    }
+
+    pub fn recv_meta(&self) -> RecvMeta {
+        RecvMeta {
+            addr: self.destination,
+            len: self.contents.len(),
+            stride: self.segment_size.unwrap_or(self.contents.len()),
+            ecn: EcnCodepoint::from_bits(self.ecn),
+            dst_ip: self.dst_ip,
+        }
+    }
+}
 
 #[derive(Debug)]
 struct UdsDatagramSocketInner {
@@ -50,6 +93,39 @@ impl UdsDatagramSocket {
         }))
     }
 
+    pub fn adsorb_runtime(self) -> Self {
+        let UdsDatagramSocketInner {
+            local_addr,
+            remote_addr,
+            socket,
+            sent,
+            recv,
+        } = Arc::try_unwrap(self.0).unwrap();
+        let socket = UnixDatagram::from_std(socket.into_std().unwrap()).unwrap();
+        Self(Arc::new(UdsDatagramSocketInner {
+            local_addr,
+            remote_addr,
+            socket,
+            sent,
+            recv,
+        }))
+    }
+
+    pub fn bind(path: &str) -> io::Result<Self> {
+        let t = tokio::net::UnixDatagram::bind(path)?;
+        let local_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 2);
+        let remote_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 1);
+        Ok(Self::new(local_addr, remote_addr, t))
+    }
+
+    pub fn connect(path: &str) -> io::Result<Self> {
+        let t = tokio::net::UnixDatagram::unbound()?;
+        t.connect(path)?;
+        let local_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 1);
+        let remote_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 2);
+        Ok(Self::new(local_addr, remote_addr, t))
+    }
+
     pub fn pair() -> io::Result<(Self, Self)> {
         let (a, b) = tokio::net::UnixDatagram::pair()?;
         let local_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 1);
@@ -68,40 +144,29 @@ impl quinn::AsyncUdpSocket for UdsDatagramSocket {
         cx: &mut std::task::Context,
         transmits: &[quinn::Transmit],
     ) -> std::task::Poll<Result<usize, std::io::Error>> {
+        println!("poll_send");
         if transmits.is_empty() {
             return Poll::Ready(Ok(0));
         }
         let inner = &self.0;
         let t0 = &transmits[0];
-        if t0.destination != inner.remote_addr {
-            return Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "wrong destination",
-            )));
-        };
-        let mut buf: Vec<u8> = Vec::with_capacity(t0.contents.len() + 8 + 1);
-        let ecn_byte = t0.ecn.map(|x| x as u8).unwrap_or(0);
-        let segment_size = t0.segment_size.unwrap_or(t0.contents.len()) as u64;
-        buf.push(ecn_byte);
-        buf.extend_from_slice(&segment_size.to_be_bytes());
-        buf.extend_from_slice(&t0.contents);
-
-        if t0.segment_size.is_some() {
-            // println!("segment_size {} {}", transmits[0].segment_size.unwrap(), t0.contents.len());
-        };
-        if t0.src_ip.is_some() {
-            return Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "src ip not supported",
-            )));
-        };
-        if t0.ecn.is_some() {
-            // println!("{:?}", t0.ecn.unwrap());
-        };
+        // if t0.destination != inner.remote_addr {
+        //     println!("destination mismatch: {:?} != {:?}", t0.destination, inner.remote_addr);
+        //     return Poll::Ready(Err(std::io::Error::new(
+        //         std::io::ErrorKind::Other,
+        //         "wrong destination",
+        //     )));
+        // };
+        let mut packet = Packet::from(t0, Some(t0.destination.ip()));
+        packet.src_ip = Some(inner.local_addr.ip());
+        let buf: Vec<u8> = bincode::serialize(&packet).unwrap();
         // package and send one packet
         match inner.socket.poll_send(cx, &buf) {
             Poll::Ready(Ok(n)) => Poll::Ready(if n == buf.len() {
-                inner.sent.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                println!("sent {} bytes", n);
+                inner
+                    .sent
+                    .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                 // println!("send {} bytes", n);
                 Ok(1)
             } else {
@@ -122,8 +187,8 @@ impl quinn::AsyncUdpSocket for UdsDatagramSocket {
         bufs: &mut [IoSliceMut<'_>],
         meta: &mut [RecvMeta],
     ) -> std::task::Poll<std::io::Result<usize>> {
+        println!("poll_recv");
         let inner = &self.0;
-        // println!("poll_recv");
         if bufs.is_empty() {
             return Poll::Ready(Ok(0));
         }
@@ -137,35 +202,29 @@ impl quinn::AsyncUdpSocket for UdsDatagramSocket {
         let mut buf = ReadBuf::new(&mut tmp);
         match self.0.socket.poll_recv(cx, &mut buf) {
             Poll::Ready(Ok(_)) => {
-                println!("recv {} bytes {}", buf.filled().len(), inner.recv.load(std::sync::atomic::Ordering::Relaxed));
-                if buf.filled().len() < 9 {
-                    return Poll::Ready(Err(std::io::Error::new(
+                println!("recv {} bytes", buf.filled().len());
+                Poll::Ready(match bincode::deserialize::<Packet>(buf.filled()) {
+                    Ok(packet) => {
+                        let n = packet.contents.len();
+                        if bufs[0].len() < n {
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                "buffer too small",
+                            ))
+                        } else {
+                            bufs[0][..n].copy_from_slice(packet.contents);
+                            meta[0] = packet.recv_meta();
+                            inner
+                                .recv
+                                .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                            Ok(1)
+                        }
+                    }
+                    Err(e) => Err(std::io::Error::new(
                         std::io::ErrorKind::Other,
-                        "too short",
-                    )));
-                }
-                let data = buf.filled();
-                inner.recv.fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
-                let ecn = data[0];
-                let stride = u64::from_be_bytes(data[1..9].try_into().unwrap()) as usize;
-                let data = data[9..].to_vec();
-                let ecn = quinn_proto::EcnCodepoint::from_bits(ecn);
-                if data.len() < stride {
-                    return Poll::Ready(Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "too short",
-                    )));
-                }
-                // println!("ecn {:?}", ecn);
-                // println!("stride {}", stride);
-                // println!("data {} bytes", data.len());
-                bufs[0][..data.len()].copy_from_slice(&data);
-                meta[0].len = data.len();
-                meta[0].dst_ip = None;
-                meta[0].ecn = ecn;
-                meta[0].addr = inner.remote_addr;
-                meta[0].stride = stride;
-                Poll::Ready(Ok(1))
+                        format!("failed to deserialize packet: {}", e),
+                    )),
+                })
             }
             Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
             Poll::Pending => Poll::Pending,
@@ -203,7 +262,9 @@ pub fn server_endpoint(
     let endpoint = {
         let _guard = rt.enter();
         let mut endpoint_config = EndpointConfig::default();
-        endpoint_config.max_udp_payload_size(MAX_UDP_PAYLOAD_SIZE).unwrap();
+        endpoint_config
+            .max_udp_payload_size(MAX_UDP_PAYLOAD_SIZE)
+            .unwrap();
         println!("server endpoint {:?}", endpoint_config);
         quinn::Endpoint::new_with_abstract_socket(
             endpoint_config,
@@ -225,7 +286,9 @@ pub async fn connect_client(
     opt: Opt,
 ) -> Result<(quinn::Endpoint, quinn::Connection)> {
     let mut endpoint_config = EndpointConfig::default();
-    endpoint_config.max_udp_payload_size(MAX_UDP_PAYLOAD_SIZE).unwrap();
+    endpoint_config
+        .max_udp_payload_size(MAX_UDP_PAYLOAD_SIZE)
+        .unwrap();
     println!("client endpoint {:?}", endpoint_config);
     let endpoint =
         quinn::Endpoint::new_with_abstract_socket(endpoint_config, None, socket, TokioRuntime)
