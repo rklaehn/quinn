@@ -1,6 +1,6 @@
 use std::{
     convert::TryInto,
-    net::{IpAddr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket},
     num::ParseIntError,
     str::FromStr,
     sync::Arc,
@@ -9,6 +9,7 @@ use std::{
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::Parser;
+use quinn::TokioRuntime;
 use rustls::RootCertStore;
 use tokio::runtime::{Builder, Runtime};
 use tracing::trace;
@@ -34,12 +35,15 @@ pub fn server_endpoint(
     let cert_chain = vec![cert];
     let mut server_config = quinn::ServerConfig::with_single_cert(cert_chain, key).unwrap();
     server_config.transport = Arc::new(transport_config(opt));
+    let endpoint_config = endpoint_config(opt);
 
     let endpoint = {
         let _guard = rt.enter();
-        quinn::Endpoint::server(
-            server_config,
-            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0),
+        quinn::Endpoint::new(
+            endpoint_config,
+            Some(server_config),
+            UdpSocket::bind(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0)).unwrap(),
+            TokioRuntime,
         )
         .unwrap()
     };
@@ -53,8 +57,14 @@ pub async fn connect_client(
     server_cert: rustls::Certificate,
     opt: Opt,
 ) -> Result<(quinn::Endpoint, quinn::Connection)> {
-    let endpoint =
-        quinn::Endpoint::client(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0)).unwrap();
+    let endpoint_config = endpoint_config(&opt);
+    let endpoint = quinn::Endpoint::new(
+        endpoint_config,
+        None,
+        UdpSocket::bind(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0)).unwrap(),
+        TokioRuntime,
+    )
+    .unwrap();
 
     let mut roots = RootCertStore::empty();
     roots.add(&server_cert)?;
@@ -144,6 +154,12 @@ pub fn transport_config(opt: &Opt) -> quinn::TransportConfig {
     let mut config = quinn::TransportConfig::default();
     config.max_concurrent_uni_streams(opt.max_streams.try_into().unwrap());
     config.initial_max_udp_payload_size(opt.initial_mtu);
+    config
+}
+
+pub fn endpoint_config(opt: &Opt) -> quinn::EndpointConfig {
+    let mut config = quinn::EndpointConfig::default();
+    config.max_udp_payload_size(opt.initial_mtu as u64).unwrap();
     config
 }
 
